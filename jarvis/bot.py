@@ -1,4 +1,7 @@
+import asyncio
+
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest, NetworkError, TimedOut
 from telegram.ext import (
     ApplicationBuilder,
     CallbackQueryHandler,
@@ -54,29 +57,62 @@ async def guard(update: Update) -> bool:
     return bool(user and user.id == ALLOWED_USER_ID)
 
 
+def _is_transient_telegram_error(exc: Exception) -> bool:
+    name = exc.__class__.__name__.lower()
+    module = exc.__class__.__module__.lower()
+    return isinstance(exc, (NetworkError, TimedOut)) or "connecterror" in name or module.startswith("httpx")
+
+
+async def telegram_call(label: str, func, *args, retries: int = 3, **kwargs):
+    last_error = None
+    for attempt in range(1, retries + 1):
+        try:
+            return await func(*args, **kwargs)
+        except BadRequest as exc:
+            if "message is not modified" in str(exc).lower():
+                return None
+            raise
+        except Exception as exc:
+            if not _is_transient_telegram_error(exc) or attempt == retries:
+                raise
+            last_error = exc
+            print(f"Telegram transient error during {label}, retry {attempt}/{retries}: {exc!r}")
+            await asyncio.sleep(1.5 * attempt)
+    if last_error:
+        raise last_error
+    return None
+
+
+async def answer_callback(query) -> None:
+    try:
+        await telegram_call("answer callback", query.answer, retries=2)
+    except Exception as exc:
+        print(f"Telegram callback answer failed, continuing: {exc!r}")
+
+
 async def reply_long(update: Update, text: str, reply_markup=None):
     parts = chunks(text, MAX_TG_TEXT)
     for part in parts[:-1]:
-        await update.effective_message.reply_text(part)
-    await update.effective_message.reply_text(parts[-1], reply_markup=reply_markup)
+        await telegram_call("reply text", update.effective_message.reply_text, part)
+    await telegram_call("reply text", update.effective_message.reply_text, parts[-1], reply_markup=reply_markup)
 
 
 async def edit_or_reply_long(message, text: str, reply_markup=None):
     parts = chunks(text, MAX_TG_TEXT)
-    await message.edit_text(parts[0], reply_markup=reply_markup if len(parts) == 1 else None)
+    await telegram_call("edit text", message.edit_text, parts[0], reply_markup=reply_markup if len(parts) == 1 else None)
     for part in parts[1:-1]:
-        await message.reply_text(part)
+        await telegram_call("reply text", message.reply_text, part)
     if len(parts) > 1:
-        await message.reply_text(parts[-1], reply_markup=reply_markup)
+        await telegram_call("reply text", message.reply_text, parts[-1], reply_markup=reply_markup)
 
 
 async def query_result(query, text: str, reply_markup=None):
     parts = chunks(text, MAX_TG_TEXT)
-    await query.edit_message_text(parts[0], reply_markup=reply_markup if len(parts) == 1 else None)
+    await telegram_call("edit callback message", query.edit_message_text, parts[0], reply_markup=reply_markup if len(parts) == 1 else None)
     for part in parts[1:-1]:
-        await query.message.reply_text(part)
+        await telegram_call("reply callback text", query.message.reply_text, part)
     if len(parts) > 1:
-        await query.message.reply_text(parts[-1], reply_markup=reply_markup)
+        await telegram_call("reply callback text", query.message.reply_text, parts[-1], reply_markup=reply_markup)
 
 
 def result_status(agent: str, answer: str) -> str:
@@ -386,12 +422,12 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await guard(update):
         return
     q = update.callback_query
-    await q.answer()
+    await answer_callback(q)
     data = q.data
     if data == "menu:home":
-        await q.edit_message_text("Главное меню:", reply_markup=main_menu())
+        await query_result(q, "Главное меню:", reply_markup=main_menu())
     elif data == "menu:agents":
-        await q.edit_message_text("Выбери агента. Потом пиши: /agent frontend твоя задача", reply_markup=agent_menu())
+        await query_result(q, "Выбери агента. Потом пиши: /agent frontend твоя задача", reply_markup=agent_menu())
     elif data == "menu:tasks":
         await query_result(q, db.list_tasks(), reply_markup=main_menu())
     elif data == "menu:files":
@@ -399,21 +435,21 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "menu:memory":
         await query_result(q, db.memories(), reply_markup=main_menu())
     elif data == "menu:plan":
-        await q.edit_message_text("Напиши: /plan твоя задача", reply_markup=main_menu())
+        await query_result(q, "Напиши: /plan твоя задача", reply_markup=main_menu())
     elif data == "menu:shell":
-        await q.edit_message_text("Напиши: /shell команда\nНапример: /shell git status", reply_markup=main_menu())
+        await query_result(q, "Напиши: /shell команда\nНапример: /shell git status", reply_markup=main_menu())
     elif data == "menu:steam":
-        await q.edit_message_text("Напиши: /steam app_id\nНапример: /steam 730", reply_markup=main_menu())
+        await query_result(q, "Напиши: /steam app_id\nНапример: /steam 730", reply_markup=main_menu())
     elif data == "menu:security":
-        await q.edit_message_text("Напиши: /agent security что проверить", reply_markup=main_menu())
+        await query_result(q, "Напиши: /agent security что проверить", reply_markup=main_menu())
     elif data.startswith("agent:"):
         ag = data.split(":", 1)[1]
-        await q.edit_message_text(f"Ок. Теперь: /agent {ag} твоя задача", reply_markup=agent_menu())
+        await query_result(q, f"Ок. Теперь: /agent {ag} твоя задача", reply_markup=agent_menu())
     elif data.startswith("confirm:"):
         approval_id = int(data.split(":", 1)[1])
         action = db.get_pending_approval(approval_id, update.effective_user.id)
         if not action:
-            await q.edit_message_text("Действие уже не найдено/устарело.")
+            await query_result(q, "Действие уже не найдено/устарело.")
             return
         db.decide_approval(approval_id, "approved")
         payload = action["payload"]
@@ -432,7 +468,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("cancel:"):
         approval_id = int(data.split(":", 1)[1])
         db.decide_approval(approval_id, "cancelled")
-        await q.edit_message_text("❌ Отменено", reply_markup=main_menu())
+        await query_result(q, "❌ Отменено", reply_markup=main_menu())
 
 
 async def plain_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -449,17 +485,25 @@ async def plain_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    print(f"Telegram handler error: {context.error}")
+    print(f"Telegram handler error: {context.error!r}")
     if isinstance(update, Update) and update.effective_message:
         try:
-            await update.effective_message.reply_text(f"Ошибка: {context.error}")
+            await telegram_call("error reply", update.effective_message.reply_text, f"Ошибка: {context.error}", retries=1)
         except Exception:
             pass
 
 
 def main():
     validate_bot_config()
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    app = (
+        ApplicationBuilder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .connect_timeout(30)
+        .read_timeout(60)
+        .write_timeout(60)
+        .pool_timeout(30)
+        .build()
+    )
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("plan", plan_cmd))
