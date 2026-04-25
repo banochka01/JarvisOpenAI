@@ -91,9 +91,10 @@ async def telegram_call(label: str, func, *args, retries: int = 3, **kwargs):
     return None
 
 
-async def answer_callback(query) -> None:
+async def answer_callback(query, text: str = "") -> None:
     try:
-        await telegram_call("answer callback", query.answer, retries=2)
+        kwargs = {"text": text[:180]} if text else {}
+        await telegram_call("answer callback", query.answer, retries=2, **kwargs)
     except Exception as exc:
         print(f"Telegram callback answer failed, continuing: {exc!r}")
 
@@ -119,15 +120,26 @@ async def edit_or_reply_long(message, text: str, reply_markup=None):
 
 async def query_result(query, text: str, reply_markup=None):
     parts = chunks(text, MAX_TG_TEXT)
+    edited = False
     try:
-        await telegram_call("edit callback message", query.edit_message_text, parts[0], reply_markup=reply_markup if len(parts) == 1 else None)
-    except BadRequest:
-        await telegram_call(
-            "reply callback text",
-            query.message.reply_text,
+        edited = await telegram_call(
+            "edit callback message",
+            query.edit_message_text,
             parts[0],
             reply_markup=reply_markup if len(parts) == 1 else None,
-        )
+        ) is not None
+    except BadRequest:
+        edited = False
+    if not edited:
+        if query.message:
+            await telegram_call(
+                "reply callback text",
+                query.message.reply_text,
+                parts[0],
+                reply_markup=reply_markup if len(parts) == 1 else None,
+            )
+        else:
+            raise RuntimeError("callback message is not available")
     for part in parts[1:-1]:
         await telegram_call("reply callback text", query.message.reply_text, part)
     if len(parts) > 1:
@@ -506,58 +518,78 @@ async def write_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await guard(update):
-        return
     q = update.callback_query
-    await answer_callback(q)
-    data = q.data
-    if data == "menu:home":
-        await query_result(q, "Главное меню:", reply_markup=main_menu())
-    elif data == "menu:agents":
-        await query_result(q, "Выбери агента. Потом пиши: /agent frontend твоя задача", reply_markup=agent_menu())
-    elif data == "menu:tasks":
-        await query_result(q, db.list_tasks(), reply_markup=main_menu())
-    elif data == "menu:files":
-        await query_result(q, list_files(), reply_markup=main_menu())
-    elif data == "menu:memory":
-        await query_result(q, db.memories(), reply_markup=main_menu())
-    elif data == "menu:plan":
-        await query_result(q, "Напиши: /plan твоя задача", reply_markup=main_menu())
-    elif data == "menu:build":
-        await query_result(q, "Напиши: /build сделать лендинг для ЦТТ Новация", reply_markup=main_menu())
-    elif data == "menu:shell":
-        await query_result(q, "Напиши: /shell команда\nНапример: /shell git status", reply_markup=main_menu())
-    elif data == "menu:steam":
-        await query_result(q, "Напиши: /steam app_id\nНапример: /steam 730", reply_markup=main_menu())
-    elif data == "menu:security":
-        await query_result(q, "Напиши: /agent security что проверить", reply_markup=main_menu())
-    elif data.startswith("agent:"):
-        ag = data.split(":", 1)[1]
-        await query_result(q, f"Ок. Теперь: /agent {ag} твоя задача", reply_markup=agent_menu())
-    elif data.startswith("confirm:"):
-        approval_id = int(data.split(":", 1)[1])
-        action = db.get_pending_approval(approval_id, update.effective_user.id)
-        if not action:
-            await query_result(q, "Действие уже не найдено/устарело.")
-            return
-        db.decide_approval(approval_id, "approved")
-        payload = action["payload"]
-        if action["action_type"] == "shell":
-            out = run_safe(payload["command"])
-        elif action["action_type"] == "steam":
-            out = install_steam_game(payload["app_id"])
-        elif action["action_type"] == "mark_done":
-            db.set_task_status(int(payload["task_id"]), "done")
-            out = f"✅ Задача #{payload['task_id']} отмечена done вручную."
-        elif action["action_type"] == "write_file":
-            out = write_file(payload["path"], payload["content"])
+    if not q:
+        return
+    if not await guard(update):
+        await answer_callback(q, "Нет доступа")
+        return
+
+    data = str(q.data or "")
+    await answer_callback(q, "Принял")
+    db.log("callback", f"user_id={update.effective_user.id if update.effective_user else '?'} data={data}")
+    try:
+        if data == "menu:home":
+            await query_result(q, "Главное меню:", reply_markup=main_menu())
+        elif data == "menu:agents":
+            await query_result(q, "Выбери агента. Потом пиши: /agent frontend твоя задача", reply_markup=agent_menu())
+        elif data == "menu:tasks":
+            await query_result(q, db.list_tasks(), reply_markup=main_menu())
+        elif data == "menu:files":
+            await query_result(q, list_files(), reply_markup=main_menu())
+        elif data == "menu:memory":
+            await query_result(q, db.memories(), reply_markup=main_menu())
+        elif data == "menu:plan":
+            await query_result(q, "Напиши: /plan твоя задача", reply_markup=main_menu())
+        elif data == "menu:build":
+            await query_result(q, "Напиши: /build сделать лендинг для ЦТТ Новация", reply_markup=main_menu())
+        elif data == "menu:shell":
+            await query_result(q, "Напиши: /shell команда\nНапример: /shell git status", reply_markup=main_menu())
+        elif data == "menu:steam":
+            await query_result(q, "Напиши: /steam app_id\nНапример: /steam 730", reply_markup=main_menu())
+        elif data == "menu:security":
+            await query_result(q, "Напиши: /agent security что проверить", reply_markup=main_menu())
+        elif data.startswith("agent:"):
+            ag = data.split(":", 1)[1]
+            await query_result(q, f"Ок. Теперь: /agent {ag} твоя задача", reply_markup=agent_menu())
+        elif data.startswith("confirm:"):
+            approval_id = int(data.split(":", 1)[1])
+            action = db.get_pending_approval(approval_id, update.effective_user.id)
+            if not action:
+                await query_result(q, "Действие уже не найдено/устарело.", reply_markup=main_menu())
+                return
+            db.decide_approval(approval_id, "approved")
+            payload = action["payload"]
+            if action["action_type"] == "shell":
+                out = run_safe(payload["command"])
+            elif action["action_type"] == "steam":
+                out = install_steam_game(payload["app_id"])
+            elif action["action_type"] == "mark_done":
+                db.set_task_status(int(payload["task_id"]), "done")
+                out = f"✅ Задача #{payload['task_id']} отмечена done вручную."
+            elif action["action_type"] == "write_file":
+                out = write_file(payload["path"], payload["content"])
+            else:
+                out = "Неизвестное действие."
+            await query_result(q, out, reply_markup=main_menu())
+        elif data.startswith("cancel:"):
+            approval_id = int(data.split(":", 1)[1])
+            action = db.get_pending_approval(approval_id, update.effective_user.id)
+            if not action:
+                await query_result(q, "Действие уже не найдено/устарело.", reply_markup=main_menu())
+                return
+            db.decide_approval(approval_id, "cancelled")
+            await query_result(q, "❌ Отменено", reply_markup=main_menu())
         else:
-            out = "Неизвестное действие."
-        await query_result(q, out, reply_markup=main_menu())
-    elif data.startswith("cancel:"):
-        approval_id = int(data.split(":", 1)[1])
-        db.decide_approval(approval_id, "cancelled")
-        await query_result(q, "❌ Отменено", reply_markup=main_menu())
+            await query_result(q, f"Неизвестная кнопка: {data}", reply_markup=main_menu())
+    except Exception as exc:
+        db.log("callback:error", f"data={data}\n{exc!r}")
+        print(f"Telegram callback failed for {data}: {exc!r}")
+        try:
+            await answer_callback(q, "Ошибка кнопки")
+            await query_result(q, f"Ошибка кнопки: {exc}", reply_markup=main_menu())
+        except Exception:
+            pass
 
 
 async def plain_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
