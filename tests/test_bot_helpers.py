@@ -7,6 +7,8 @@ from jarvis.text_utils import (
     strip_new_task_prefix,
 )
 
+from jarvis.approval_utils import approval_title, parse_approval_id
+
 
 def test_chunks_splits_long_text():
     parts = chunks("abcde", limit=2)
@@ -58,3 +60,14 @@ def test_build_clarified_task_keeps_original_and_answer_together():
     assert "Исходная задача:\nсделай заглушку" in combined
     assert "Уточнение пользователя:\nназвание ЦТТ новация" in combined
     assert "Не считай уточнение новой отдельной задачей." in combined
+
+
+def test_approval_command_helpers():
+    assert parse_approval_id(["12"]) == 12
+    assert parse_approval_id(["#12"]) == 12
+    assert parse_approval_id(["abc"]) is None
+    assert parse_approval_id([]) is None
+
+    assert approval_title("shell", {"command": "git status"}) == "shell: git status"
+    assert approval_title("write_file", {"path": "site/index.html"}) == "write_file: site/index.html"
+    assert approval_title("mark_done", {"task_id": 5}) == "mark_done: task #5"

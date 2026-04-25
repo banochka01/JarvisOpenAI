@@ -11,6 +11,7 @@ from telegram.ext import (
     filters,
 )
 
+from jarvis.approval_utils import approval_title, parse_approval_id
 from jarvis.agents.llm import ask_agent, build_plan
 from jarvis.agents.prompts import AGENT_PROMPTS
 from jarvis.config import ALLOWED_USER_ID, AUTO_APPROVE_SAFE_COMMANDS, DB_PATH, TELEGRAM_BOT_TOKEN, validate_bot_config
@@ -37,10 +38,10 @@ orchestrator = Orchestrator(db)
 def main_menu():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🧠 План", callback_data="menu:plan"), InlineKeyboardButton("🏗 Build", callback_data="menu:build")],
-        [InlineKeyboardButton("🧩 Агенты", callback_data="menu:agents"), InlineKeyboardButton("📋 Задачи", callback_data="menu:tasks")],
-        [InlineKeyboardButton("🗂 Файлы", callback_data="menu:files"), InlineKeyboardButton("🛡 Проверка", callback_data="menu:security")],
-        [InlineKeyboardButton("💾 Память", callback_data="menu:memory"), InlineKeyboardButton("⚙️ Shell", callback_data="menu:shell")],
-        [InlineKeyboardButton("🎮 Steam", callback_data="menu:steam")],
+        [InlineKeyboardButton("✅ Approvals", callback_data="menu:approvals"), InlineKeyboardButton("📋 Задачи", callback_data="menu:tasks")],
+        [InlineKeyboardButton("🧩 Агенты", callback_data="menu:agents"), InlineKeyboardButton("🗂 Файлы", callback_data="menu:files")],
+        [InlineKeyboardButton("🛡 Проверка", callback_data="menu:security"), InlineKeyboardButton("💾 Память", callback_data="menu:memory")],
+        [InlineKeyboardButton("⚙️ Shell", callback_data="menu:shell"), InlineKeyboardButton("🎮 Steam", callback_data="menu:steam")],
     ])
 
 
@@ -176,18 +177,59 @@ def format_orchestration_result(result, pending_note: str = "") -> str:
     return text_out
 
 
+def format_pending_approvals(user_id: int) -> str:
+    rows = db.list_pending_approvals_for_user(user_id)
+    if not rows:
+        return "Pending approvals нет."
+    lines = ["Pending approvals:"]
+    for item in rows:
+        lines.append(f"#{item['id']} {approval_title(item['action_type'], item['payload'])}")
+    lines.append("")
+    lines.append("Команды:")
+    lines.append("/approve id — выполнить")
+    lines.append("/cancel id — отменить")
+    return "\n".join(lines)
+
+
+def execute_approval(approval_id: int, user_id: int) -> str:
+    action = db.get_pending_approval(approval_id, user_id)
+    if not action:
+        return "Действие уже не найдено/устарело."
+
+    db.decide_approval(approval_id, "approved")
+    payload = action["payload"]
+    if action["action_type"] == "shell":
+        out = run_safe(payload["command"])
+    elif action["action_type"] == "steam":
+        out = install_steam_game(payload["app_id"])
+    elif action["action_type"] == "mark_done":
+        db.set_task_status(int(payload["task_id"]), "done")
+        out = f"✅ Задача #{payload['task_id']} отмечена done вручную."
+    elif action["action_type"] == "write_file":
+        out = write_file(payload["path"], payload["content"])
+    else:
+        out = "Неизвестное действие."
+    db.log("approval:approved", f"#{approval_id} user_id={user_id} type={action['action_type']}\n{out}")
+    return out
+
+
+def cancel_approval(approval_id: int, user_id: int) -> str:
+    action = db.get_pending_approval(approval_id, user_id)
+    if not action:
+        return "Действие уже не найдено/устарело."
+    db.decide_approval(approval_id, "cancelled")
+    db.log("approval:cancelled", f"#{approval_id} user_id={user_id} type={action['action_type']}")
+    return "❌ Отменено"
+
+
 async def send_approval_buttons(update: Update, approval_ids: list[int], ok_text: str = "✅ Выполнить"):
     for approval_id in approval_ids:
         approval = db.get_approval_any_user(approval_id)
         if not approval:
             continue
         payload = approval["payload"]
-        if approval["action_type"] == "write_file":
-            label = f"Подтверди запись файла: {payload.get('path', '?')}"
-        elif approval["action_type"] == "shell":
-            label = f"Подтверди команду: {payload.get('command', '?')}"
-        else:
-            label = f"Подтверди действие #{approval_id}: {approval['action_type']}"
+        title = approval_title(approval["action_type"], payload)
+        label = f"Approval #{approval_id}: {title}\n\nКнопки ниже или команды: /approve {approval_id} /cancel {approval_id}"
         await telegram_call(
             "approval prompt",
             update.effective_message.reply_text,
@@ -216,6 +258,9 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /addtask агент | название | описание — добавить задачу
 /status id статус — поставить new/planned/in_progress/testing/needs_fix/done/failed
 /done id — отметить задачу done после review/test или через approve
+/approvals — показать ожидающие подтверждения
+/approve id — выполнить approval без кнопки
+/cancel id — отменить approval без кнопки
 /shell команда — команда в workspace через whitelist и approve
 /gitstatus — показать git status
 /gitdiff — показать git diff
@@ -382,6 +427,34 @@ async def done_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def approvals_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await guard(update):
+        return
+    await reply_long(update, format_pending_approvals(update.effective_user.id), reply_markup=main_menu())
+
+
+async def approve_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await guard(update):
+        return
+    approval_id = parse_approval_id(context.args)
+    if approval_id is None:
+        await update.message.reply_text("Формат: /approve 12")
+        return
+    out = execute_approval(approval_id, update.effective_user.id)
+    await reply_long(update, out, reply_markup=main_menu())
+
+
+async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await guard(update):
+        return
+    approval_id = parse_approval_id(context.args)
+    if approval_id is None:
+        await update.message.reply_text("Формат: /cancel 12")
+        return
+    out = cancel_approval(approval_id, update.effective_user.id)
+    await reply_long(update, out, reply_markup=main_menu())
+
+
 async def memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await guard(update):
         return
@@ -535,6 +608,8 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query_result(q, "Выбери агента. Потом пиши: /agent frontend твоя задача", reply_markup=agent_menu())
         elif data == "menu:tasks":
             await query_result(q, db.list_tasks(), reply_markup=main_menu())
+        elif data == "menu:approvals":
+            await query_result(q, format_pending_approvals(update.effective_user.id), reply_markup=main_menu())
         elif data == "menu:files":
             await query_result(q, list_files(), reply_markup=main_menu())
         elif data == "menu:memory":
@@ -554,32 +629,12 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query_result(q, f"Ок. Теперь: /agent {ag} твоя задача", reply_markup=agent_menu())
         elif data.startswith("confirm:"):
             approval_id = int(data.split(":", 1)[1])
-            action = db.get_pending_approval(approval_id, update.effective_user.id)
-            if not action:
-                await query_result(q, "Действие уже не найдено/устарело.", reply_markup=main_menu())
-                return
-            db.decide_approval(approval_id, "approved")
-            payload = action["payload"]
-            if action["action_type"] == "shell":
-                out = run_safe(payload["command"])
-            elif action["action_type"] == "steam":
-                out = install_steam_game(payload["app_id"])
-            elif action["action_type"] == "mark_done":
-                db.set_task_status(int(payload["task_id"]), "done")
-                out = f"✅ Задача #{payload['task_id']} отмечена done вручную."
-            elif action["action_type"] == "write_file":
-                out = write_file(payload["path"], payload["content"])
-            else:
-                out = "Неизвестное действие."
+            out = execute_approval(approval_id, update.effective_user.id)
             await query_result(q, out, reply_markup=main_menu())
         elif data.startswith("cancel:"):
             approval_id = int(data.split(":", 1)[1])
-            action = db.get_pending_approval(approval_id, update.effective_user.id)
-            if not action:
-                await query_result(q, "Действие уже не найдено/устарело.", reply_markup=main_menu())
-                return
-            db.decide_approval(approval_id, "cancelled")
-            await query_result(q, "❌ Отменено", reply_markup=main_menu())
+            out = cancel_approval(approval_id, update.effective_user.id)
+            await query_result(q, out, reply_markup=main_menu())
         else:
             await query_result(q, f"Неизвестная кнопка: {data}", reply_markup=main_menu())
     except Exception as exc:
@@ -681,6 +736,9 @@ def main():
     app.add_handler(CommandHandler("addtask", addtask_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("done", done_cmd))
+    app.add_handler(CommandHandler("approvals", approvals_cmd))
+    app.add_handler(CommandHandler("approve", approve_cmd))
+    app.add_handler(CommandHandler("cancel", cancel_cmd))
     app.add_handler(CommandHandler("memory", memory_cmd))
     app.add_handler(CommandHandler("remember", remember_cmd))
     app.add_handler(CommandHandler("shell", shell_cmd))

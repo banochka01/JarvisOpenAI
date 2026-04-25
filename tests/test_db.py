@@ -49,6 +49,21 @@ def test_task_messages_agent_results_and_approvals(tmp_path):
     assert db.get_pending_approval(approval_id, 123) is None
 
 
+def test_list_pending_approvals_for_user_filters_status_and_user(tmp_path):
+    db = JarvisDB(tmp_path / "jarvis.db")
+
+    first = db.create_approval(123, "shell", {"command": "git status"})
+    db.create_approval(456, "shell", {"command": "git diff"})
+    done = db.create_approval(123, "steam", {"app_id": "730"})
+    db.decide_approval(done, "cancelled")
+
+    rows = db.list_pending_approvals_for_user(123)
+
+    assert [item["id"] for item in rows] == [first]
+    assert rows[0]["action_type"] == "shell"
+    assert rows[0]["payload"]["command"] == "git status"
+
+
 def test_pending_clarification_lifecycle(tmp_path):
     db = JarvisDB(tmp_path / "jarvis.db")
 

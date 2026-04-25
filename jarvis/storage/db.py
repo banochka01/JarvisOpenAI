@@ -210,6 +210,25 @@ class JarvisDB:
         with self.conn() as db:
             return db.execute(query, params).fetchall()
 
+    def list_pending_approvals_for_user(self, user_id: int, limit: int = 20):
+        with self.conn() as db:
+            rows = db.execute(
+                """SELECT id,action_type,payload_json,created_at
+                   FROM approval_requests
+                   WHERE user_id=? AND status='pending'
+                   ORDER BY id DESC LIMIT ?""",
+                (user_id, limit),
+            ).fetchall()
+        return [
+            {
+                "id": row[0],
+                "action_type": row[1],
+                "payload": json.loads(row[2]),
+                "created_at": row[3],
+            }
+            for row in rows
+        ]
+
     def get_approval_any_user(self, approval_id: int):
         with self.conn() as db:
             row = db.execute(

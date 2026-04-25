@@ -74,6 +74,9 @@ run_windows.bat
 - `/addtask агент | название | описание` — создать задачу со статусом `new`.
 - `/status id статус` — поставить статус вручную.
 - `/done id` — отметить задачу выполненной после успешного tester/reviewer результата или через approve.
+- `/approvals` — показать ожидающие подтверждения.
+- `/approve id` — выполнить approval без кнопки.
+- `/cancel id` — отменить approval без кнопки.
 - `/shell команда` — выполнить whitelisted-команду внутри workspace.
 - `/gitstatus` — показать `git status`.
 - `/gitdiff` — показать `git diff`.
