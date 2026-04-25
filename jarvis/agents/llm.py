@@ -65,6 +65,7 @@ def build_plan(user_text: str, memory: str = "") -> str:
 - Не проси выполнить опасные команды без подтверждения.
 - Не предлагай доступ к C:\\Users, AppData, браузерным кукам, токенам и неизвестным exe.
 - Любые изменения файлов сначала должны идти как diff/preview.
+- Если нужны уточнения, остановись после вопросов и не строй план до ответа пользователя.
 
 Задача: {user_text}"""
     return ask_agent("supervisor", prompt, memory)
@@ -91,6 +92,42 @@ Schema:
 - Не добавляй опасные команды, shell operators, абсолютные пути, доступ к C:\\Users/AppData/cookies/tokens.
 - Любая запись файла должна быть полным content для файла, а не инструкцией словами.
 - Если задача мутная, поставь needs_clarification=true и задай 1-3 questions.
+- Если needs_clarification=true, proposed_actions должен быть пустым и plan должен содержать только шаг ожидания ответа.
+
+Память:
+{memory}
+
+Задача: {user_text}"""
+    return ask_agent("supervisor", prompt, memory)
+
+
+def build_site_action_plan(user_text: str, memory: str = "") -> str:
+    prompt = f"""Верни только JSON object без Markdown.
+
+Ты builder-агент. Твоя задача — не просто спланировать, а подготовить готовые файлы для статического сайта/страницы внутри workspace.
+
+Schema:
+{{
+  "needs_clarification": false,
+  "questions": [],
+  "summary": "что будет создано",
+  "plan": ["какие файлы будут записаны"],
+  "proposed_actions": [
+    {{"type": "write_file", "path": "site/index.html", "content": "полный HTML"}},
+    {{"type": "write_file", "path": "site/styles.css", "content": "полный CSS"}},
+    {{"type": "write_file", "path": "site/script.js", "content": "полный JS, если нужен"}}
+  ]
+}}
+
+Правила:
+- Для сайта/лендинга/заглушки почти всегда создавай минимум index.html и styles.css с полным содержимым.
+- Используй относительные пути внутри workspace. Хороший путь: site/index.html или landing/index.html.
+- Не используй внешние CDN, трекеры, analytics, формы с реальной отправкой данных или серверные интеграции.
+- Если пользователь дал телефон, email или текст, можно показать их статически на странице.
+- Если часть деталей неизвестна, сделай разумные безопасные допущения и укажи их в summary.
+- Ставь needs_clarification=true только если без ответа невозможно сделать полезный результат.
+- Если needs_clarification=true, proposed_actions должен быть пустым.
+- Не добавляй shell actions для build-режима.
 
 Память:
 {memory}

@@ -47,3 +47,22 @@ def test_task_messages_agent_results_and_approvals(tmp_path):
     assert approval["payload"]["command"] == "git status"
     db.decide_approval(approval_id, "approved")
     assert db.get_pending_approval(approval_id, 123) is None
+
+
+def test_pending_clarification_lifecycle(tmp_path):
+    db = JarvisDB(tmp_path / "jarvis.db")
+
+    first_id = db.create_clarification_request(123, "make landing", ["What brand?"], mode="plan")
+    second_id = db.create_clarification_request(123, "make site", ["Which style?"], mode="build")
+
+    pending = db.get_pending_clarification(123)
+
+    assert pending["id"] == second_id
+    assert pending["mode"] == "build"
+    assert pending["task_text"] == "make site"
+    assert pending["questions"] == ["Which style?"]
+    assert first_id != second_id
+
+    db.resolve_clarification(second_id)
+
+    assert db.get_pending_clarification(123) is None

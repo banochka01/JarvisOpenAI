@@ -16,7 +16,14 @@ from jarvis.agents.prompts import AGENT_PROMPTS
 from jarvis.config import ALLOWED_USER_ID, AUTO_APPROVE_SAFE_COMMANDS, DB_PATH, TELEGRAM_BOT_TOKEN, validate_bot_config
 from jarvis.orchestrator import Orchestrator
 from jarvis.storage.db import TASK_STATUSES, JarvisDB
-from jarvis.text_utils import chunks, parse_task_ref
+from jarvis.text_utils import (
+    assistant_needs_clarification,
+    build_clarified_task,
+    chunks,
+    extract_clarification_questions,
+    parse_task_ref,
+    strip_new_task_prefix,
+)
 from jarvis.tools.file_tool import list_files, preview_diff, read_file, write_file
 from jarvis.tools.safe_shell import READ_ONLY, classify_command, run_safe
 from jarvis.tools.steam_tool import install_steam_game
@@ -29,10 +36,11 @@ orchestrator = Orchestrator(db)
 
 def main_menu():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🧠 План", callback_data="menu:plan"), InlineKeyboardButton("🧩 Агенты", callback_data="menu:agents")],
-        [InlineKeyboardButton("📋 Задачи", callback_data="menu:tasks"), InlineKeyboardButton("🗂 Файлы", callback_data="menu:files")],
-        [InlineKeyboardButton("🛡 Проверка", callback_data="menu:security"), InlineKeyboardButton("💾 Память", callback_data="menu:memory")],
-        [InlineKeyboardButton("⚙️ Shell", callback_data="menu:shell"), InlineKeyboardButton("🎮 Steam", callback_data="menu:steam")],
+        [InlineKeyboardButton("🧠 План", callback_data="menu:plan"), InlineKeyboardButton("🏗 Build", callback_data="menu:build")],
+        [InlineKeyboardButton("🧩 Агенты", callback_data="menu:agents"), InlineKeyboardButton("📋 Задачи", callback_data="menu:tasks")],
+        [InlineKeyboardButton("🗂 Файлы", callback_data="menu:files"), InlineKeyboardButton("🛡 Проверка", callback_data="menu:security")],
+        [InlineKeyboardButton("💾 Память", callback_data="menu:memory"), InlineKeyboardButton("⚙️ Shell", callback_data="menu:shell")],
+        [InlineKeyboardButton("🎮 Steam", callback_data="menu:steam")],
     ])
 
 
@@ -99,7 +107,10 @@ async def reply_long(update: Update, text: str, reply_markup=None):
 
 async def edit_or_reply_long(message, text: str, reply_markup=None):
     parts = chunks(text, MAX_TG_TEXT)
-    await telegram_call("edit text", message.edit_text, parts[0], reply_markup=reply_markup if len(parts) == 1 else None)
+    try:
+        await telegram_call("edit text", message.edit_text, parts[0], reply_markup=reply_markup if len(parts) == 1 else None)
+    except BadRequest:
+        await telegram_call("reply text", message.reply_text, parts[0], reply_markup=reply_markup if len(parts) == 1 else None)
     for part in parts[1:-1]:
         await telegram_call("reply text", message.reply_text, part)
     if len(parts) > 1:
@@ -108,7 +119,15 @@ async def edit_or_reply_long(message, text: str, reply_markup=None):
 
 async def query_result(query, text: str, reply_markup=None):
     parts = chunks(text, MAX_TG_TEXT)
-    await telegram_call("edit callback message", query.edit_message_text, parts[0], reply_markup=reply_markup if len(parts) == 1 else None)
+    try:
+        await telegram_call("edit callback message", query.edit_message_text, parts[0], reply_markup=reply_markup if len(parts) == 1 else None)
+    except BadRequest:
+        await telegram_call(
+            "reply callback text",
+            query.message.reply_text,
+            parts[0],
+            reply_markup=reply_markup if len(parts) == 1 else None,
+        )
     for part in parts[1:-1]:
         await telegram_call("reply callback text", query.message.reply_text, part)
     if len(parts) > 1:
@@ -120,6 +139,49 @@ def result_status(agent: str, answer: str) -> str:
     if agent in {"tester", "reviewer", "security"} and upper.startswith("BLOCKERS:"):
         return "blockers"
     return "ok"
+
+
+def remember_clarification(user_id: int, mode: str, task_text: str, answer: str, questions: list[str] | None = None):
+    items = questions or extract_clarification_questions(answer)
+    db.create_clarification_request(user_id, task_text, items, mode=mode)
+
+
+def clarification_hint() -> str:
+    return "\n\nОтветь обычным сообщением — я продолжу эту же задачу. Для новой задачи начни с: новая задача:"
+
+
+def format_orchestration_result(result, pending_note: str = "") -> str:
+    extra = []
+    if pending_note:
+        extra.append(pending_note)
+    if result.approvals:
+        extra.append("Approvals созданы: " + ", ".join(f"#{item}" for item in result.approvals))
+    if result.rejected_actions:
+        extra.append("Отклонённые actions: " + str(len(result.rejected_actions)))
+    text_out = f"Задача #{result.task_id}\n\n{result.text}"
+    if extra:
+        text_out += "\n\n" + "\n".join(extra)
+    return text_out
+
+
+async def send_approval_buttons(update: Update, approval_ids: list[int], ok_text: str = "✅ Выполнить"):
+    for approval_id in approval_ids:
+        approval = db.get_approval_any_user(approval_id)
+        if not approval:
+            continue
+        payload = approval["payload"]
+        if approval["action_type"] == "write_file":
+            label = f"Подтверди запись файла: {payload.get('path', '?')}"
+        elif approval["action_type"] == "shell":
+            label = f"Подтверди команду: {payload.get('command', '?')}"
+        else:
+            label = f"Подтверди действие #{approval_id}: {approval['action_type']}"
+        await telegram_call(
+            "approval prompt",
+            update.effective_message.reply_text,
+            label,
+            reply_markup=approval_menu(approval_id, ok_text),
+        )
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -135,6 +197,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /start — меню
 /plan текст — сделать безопасный план
 /run текст — создать задачу, получить JSON-план и approvals
+/build текст — создать готовые файлы сайта/страницы через write_file approvals
 /agent backend|frontend|tester|devops|reviewer|security текст — спросить агента
 /agent reviewer #3 текст — reviewer/tester результат для задачи #3
 /tasks — список задач
@@ -160,9 +223,13 @@ async def plan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         await update.message.reply_text("Напиши так: /plan сделать сайт для FPV клуба")
         return
+    db.cancel_pending_clarification(update.effective_user.id)
     db.add_message("user", text)
     msg = await update.message.reply_text("🧠 Думаю план...")
     ans = build_plan(text, db.memories())
+    if assistant_needs_clarification(ans):
+        remember_clarification(update.effective_user.id, "plan", text, ans)
+        ans += clarification_hint()
     db.log("plan", ans)
     db.add_message("assistant", ans)
     await edit_or_reply_long(msg, ans, reply_markup=main_menu())
@@ -175,17 +242,37 @@ async def run_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         await update.message.reply_text("Формат: /run сделать безопасный план и предложить actions")
         return
+    db.cancel_pending_clarification(update.effective_user.id)
     msg = await update.message.reply_text("🧭 Собираю JSON-план и approvals...")
     result = orchestrator.plan_task(text, update.effective_user.id)
-    extra = []
-    if result.approvals:
-        extra.append("Approvals созданы: " + ", ".join(f"#{item}" for item in result.approvals))
-    if result.rejected_actions:
-        extra.append("Отклонённые actions: " + str(len(result.rejected_actions)))
-    text_out = f"Задача #{result.task_id}\n\n{result.text}"
-    if extra:
-        text_out += "\n\n" + "\n".join(extra)
+    pending_note = ""
+    if result.needs_clarification:
+        remember_clarification(update.effective_user.id, "run", text, result.text, result.questions or None)
+        pending_note = "Жду уточнение обычным сообщением. Для новой задачи начни с: новая задача:"
+    text_out = format_orchestration_result(result, pending_note)
     await edit_or_reply_long(msg, text_out, reply_markup=main_menu())
+
+
+async def build_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await guard(update):
+        return
+    text = " ".join(context.args) or update.message.text.replace("/build", "", 1).strip()
+    if not text:
+        await update.message.reply_text("Формат: /build сделать лендинг для ЦТТ Новация")
+        return
+    db.cancel_pending_clarification(update.effective_user.id)
+    msg = await update.message.reply_text("🏗 Готовлю файлы и approvals...")
+    result = orchestrator.build_task(text, update.effective_user.id)
+    pending_note = ""
+    if result.needs_clarification:
+        remember_clarification(update.effective_user.id, "build", text, result.text, result.questions or None)
+        pending_note = "Жду уточнение обычным сообщением. Для новой задачи начни с: новая задача:"
+    elif result.approvals:
+        pending_note = "После approve файлы появятся в workspace. Посмотреть их можно через /files."
+    text_out = format_orchestration_result(result, pending_note)
+    await edit_or_reply_long(msg, text_out, reply_markup=main_menu())
+    if result.approvals:
+        await send_approval_buttons(update, result.approvals, "✅ Записать")
 
 
 async def agent_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -436,6 +523,8 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query_result(q, db.memories(), reply_markup=main_menu())
     elif data == "menu:plan":
         await query_result(q, "Напиши: /plan твоя задача", reply_markup=main_menu())
+    elif data == "menu:build":
+        await query_result(q, "Напиши: /build сделать лендинг для ЦТТ Новация", reply_markup=main_menu())
     elif data == "menu:shell":
         await query_result(q, "Напиши: /shell команда\nНапример: /shell git status", reply_markup=main_menu())
     elif data == "menu:steam":
@@ -475,9 +564,55 @@ async def plain_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await guard(update):
         return
     text = update.message.text
+    is_new_task, cleaned_text = strip_new_task_prefix(text)
+    if is_new_task:
+        db.cancel_pending_clarification(update.effective_user.id)
+        text = cleaned_text
+        if not text:
+            await update.message.reply_text("После `новая задача:` напиши текст задачи.")
+            return
+
+    pending = None if is_new_task else db.get_pending_clarification(update.effective_user.id)
+    if pending:
+        db.resolve_clarification(pending["id"])
+        combined = build_clarified_task(pending["task_text"], text)
+        if pending["mode"] in {"run", "build"}:
+            if pending["mode"] == "build":
+                msg = await update.message.reply_text("🏗 Принял уточнение, готовлю файлы...")
+                result = orchestrator.build_task(combined, update.effective_user.id)
+            else:
+                msg = await update.message.reply_text("🧭 Принял уточнение, обновляю JSON-план...")
+                result = orchestrator.plan_task(combined, update.effective_user.id)
+            pending_note = ""
+            if result.needs_clarification:
+                remember_clarification(update.effective_user.id, pending["mode"], combined, result.text, result.questions or None)
+                pending_note = "Жду ещё одно уточнение обычным сообщением. Для новой задачи начни с: новая задача:"
+            elif pending["mode"] == "build" and result.approvals:
+                pending_note = "После approve файлы появятся в workspace. Посмотреть их можно через /files."
+            text_out = format_orchestration_result(result, pending_note)
+            await edit_or_reply_long(msg, text_out, reply_markup=main_menu())
+            if pending["mode"] == "build" and result.approvals:
+                await send_approval_buttons(update, result.approvals, "✅ Записать")
+            return
+
+        db.add_message("user", combined)
+        msg = await update.message.reply_text("🧠 Принял уточнение, продолжаю прошлую задачу...")
+        ans = build_plan(combined, db.memories())
+        if assistant_needs_clarification(ans):
+            remember_clarification(update.effective_user.id, "plan", combined, ans)
+            ans += clarification_hint()
+        db.log("clarification", combined)
+        db.log("answer", ans)
+        db.add_message("assistant", ans)
+        await edit_or_reply_long(msg, ans, reply_markup=main_menu())
+        return
+
     db.add_message("user", text)
     msg = await update.message.reply_text("🧠 Разбираю задачу...")
     ans = build_plan(text, db.memories())
+    if assistant_needs_clarification(ans):
+        remember_clarification(update.effective_user.id, "plan", text, ans)
+        ans += clarification_hint()
     db.log("incoming", text)
     db.log("answer", ans)
     db.add_message("assistant", ans)
@@ -508,6 +643,7 @@ def main():
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("plan", plan_cmd))
     app.add_handler(CommandHandler("run", run_cmd))
+    app.add_handler(CommandHandler("build", build_cmd))
     app.add_handler(CommandHandler("agent", agent_cmd))
     app.add_handler(CommandHandler("tasks", tasks_cmd))
     app.add_handler(CommandHandler("addtask", addtask_cmd))

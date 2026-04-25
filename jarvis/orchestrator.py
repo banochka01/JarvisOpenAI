@@ -1,7 +1,8 @@
 from dataclasses import dataclass
+from typing import Callable
 
 from jarvis.action_protocol import ProposedAction, format_plan_for_human, parse_supervisor_plan
-from jarvis.agents.llm import build_action_plan
+from jarvis.agents.llm import build_action_plan, build_site_action_plan
 from jarvis.storage.db import JarvisDB
 
 
@@ -14,22 +15,31 @@ class OrchestrationResult:
     text: str
     approvals: list[int]
     rejected_actions: list[ProposedAction]
+    needs_clarification: bool = False
+    questions: list[str] | None = None
 
 
 class Orchestrator:
     def __init__(self, db: JarvisDB):
         self.db = db
 
-    def plan_task(self, user_text: str, user_id: int = SYSTEM_USER_ID) -> OrchestrationResult:
-        task_id = self.db.add_task(user_text[:120] or "Task", user_text, "supervisor", status="planned")
+    def _plan_with(
+        self,
+        user_text: str,
+        user_id: int,
+        planner: Callable[[str, str], str],
+        agent: str,
+        log_kind: str,
+    ) -> OrchestrationResult:
+        task_id = self.db.add_task(user_text[:120] or "Task", user_text, agent, status="planned")
         self.db.add_message("user", user_text, task_id)
 
-        raw = build_action_plan(user_text, self.db.memories())
+        raw = planner(user_text, self.db.memories())
         plan = parse_supervisor_plan(raw)
         human = format_plan_for_human(plan)
         self.db.add_message("assistant", human, task_id)
-        self.db.add_agent_result("supervisor", raw, task_id, "ok")
-        self.db.log("orchestrator:plan", f"task_id={task_id}\n{raw}")
+        self.db.add_agent_result(agent, raw, task_id, "ok")
+        self.db.log(log_kind, f"task_id={task_id}\n{raw}")
 
         approvals: list[int] = []
         rejected: list[ProposedAction] = []
@@ -46,7 +56,20 @@ class Orchestrator:
             )
             approvals.append(approval_id)
 
-        return OrchestrationResult(task_id=task_id, text=human, approvals=approvals, rejected_actions=rejected)
+        return OrchestrationResult(
+            task_id=task_id,
+            text=human,
+            approvals=approvals,
+            rejected_actions=rejected,
+            needs_clarification=plan.needs_clarification,
+            questions=plan.questions,
+        )
+
+    def plan_task(self, user_text: str, user_id: int = SYSTEM_USER_ID) -> OrchestrationResult:
+        return self._plan_with(user_text, user_id, build_action_plan, "supervisor", "orchestrator:plan")
+
+    def build_task(self, user_text: str, user_id: int = SYSTEM_USER_ID) -> OrchestrationResult:
+        return self._plan_with(user_text, user_id, build_site_action_plan, "builder", "orchestrator:build")
 
     def record_test_result(self, task_id: int, content: str) -> None:
         status = "blockers" if content.strip().upper().startswith("BLOCKERS:") else "ok"

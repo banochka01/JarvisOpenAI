@@ -67,6 +67,7 @@ run_windows.bat
 - `/help` — список команд.
 - `/plan текст` — безопасный план задачи.
 - `/run текст` — создать задачу, получить JSON-план supervisor и завести approvals на proposed actions.
+- `/build текст` — создать готовые файлы статического сайта/страницы через `write_file` approvals.
 - `/agent backend|frontend|tester|devops|reviewer|security текст` — спросить агента.
 - `/agent reviewer #3 текст` — записать результат reviewer/tester/security для задачи `#3`.
 - `/tasks` — список задач.
@@ -122,6 +123,7 @@ task -> plan -> execute -> test -> review -> fix -> retest -> done
 В текущем MVP есть два режима:
 - `/plan` — человекочитаемый план без создания actions.
 - `/run` — supervisor возвращает JSON-протокол: `needs_clarification`, `questions`, `summary`, `plan`, `proposed_actions`.
+- `/build` — builder-режим для сайтов/страниц: просит модель вернуть готовые `write_file` actions с полным HTML/CSS/JS и создаёт approvals на запись файлов.
 
 `proposed_actions` поддерживает только:
 - `shell` с командой из whitelist;

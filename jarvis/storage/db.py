@@ -73,6 +73,21 @@ class JarvisDB:
                 created_at TEXT NOT NULL,
                 decided_at TEXT
             )""")
+            db.execute("""CREATE TABLE IF NOT EXISTS clarification_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                mode TEXT NOT NULL DEFAULT 'plan',
+                task_text TEXT NOT NULL,
+                questions_json TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL,
+                resolved_at TEXT
+            )""")
+            clarification_columns = {
+                row[1] for row in db.execute("PRAGMA table_info(clarification_requests)").fetchall()
+            }
+            if "mode" not in clarification_columns:
+                db.execute("ALTER TABLE clarification_requests ADD COLUMN mode TEXT NOT NULL DEFAULT 'plan'")
             for old, new in STATUS_MIGRATION.items():
                 db.execute("UPDATE tasks SET status=? WHERE status=?", (new, old))
             db.execute("UPDATE schema_version SET version=2")
@@ -232,4 +247,59 @@ class JarvisDB:
             db.execute(
                 "UPDATE approval_requests SET status=?, decided_at=? WHERE id=? AND status='pending'",
                 (status, self._now(), approval_id),
+            )
+
+    def create_clarification_request(
+        self,
+        user_id: int,
+        task_text: str,
+        questions: list[str],
+        mode: str = "plan",
+    ) -> int:
+        if mode not in {"plan", "run", "build"}:
+            raise ValueError("clarification mode must be plan, run or build")
+        now = self._now()
+        with self.conn() as db:
+            db.execute(
+                "UPDATE clarification_requests SET status='cancelled', resolved_at=? WHERE user_id=? AND status='pending'",
+                (now, user_id),
+            )
+            cur = db.execute(
+                """INSERT INTO clarification_requests(user_id,mode,task_text,questions_json,status,created_at)
+                   VALUES(?,?,?,?,?,?)""",
+                (user_id, mode, task_text, json.dumps(questions, ensure_ascii=False), "pending", now),
+            )
+            return int(cur.lastrowid)
+
+    def get_pending_clarification(self, user_id: int):
+        with self.conn() as db:
+            row = db.execute(
+                """SELECT id,mode,task_text,questions_json,created_at
+                   FROM clarification_requests
+                   WHERE user_id=? AND status='pending'
+                   ORDER BY id DESC LIMIT 1""",
+                (user_id,),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "id": row[0],
+            "mode": row[1],
+            "task_text": row[2],
+            "questions": json.loads(row[3]),
+            "created_at": row[4],
+        }
+
+    def resolve_clarification(self, clarification_id: int):
+        with self.conn() as db:
+            db.execute(
+                "UPDATE clarification_requests SET status='resolved', resolved_at=? WHERE id=? AND status='pending'",
+                (self._now(), clarification_id),
+            )
+
+    def cancel_pending_clarification(self, user_id: int):
+        with self.conn() as db:
+            db.execute(
+                "UPDATE clarification_requests SET status='cancelled', resolved_at=? WHERE user_id=? AND status='pending'",
+                (self._now(), user_id),
             )
