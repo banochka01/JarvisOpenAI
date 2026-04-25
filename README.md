@@ -7,7 +7,7 @@ Telegram-бот-оркестратор для Windows 10: пользовател
 ## Установка На Windows 10
 
 1. Установи зависимости:
-   - Python 3.12+ с галочкой **Add Python to PATH**: https://www.python.org/downloads/windows/
+   - Python 3.12.x с галочкой **Add Python to PATH** и py launcher: https://www.python.org/downloads/release/python-3128/
    - Git for Windows: https://git-scm.com/download/win
    - Node.js LTS: https://nodejs.org/
    - Docker Desktop, если нужны Docker-команды: https://www.docker.com/products/docker-desktop/
@@ -34,6 +34,8 @@ C:\Jarvis\jarvis_agents_mvp_plus
 ```bat
 install_windows.bat
 ```
+
+Важно: не используй Python 3.14 для этого MVP. На Windows часть зависимостей может начать собираться из исходников через Rust/maturin. Установщик специально ищет Python 3.12 и ставит только готовые binary wheels.
 
 6. Открой `.env` и заполни:
 
