@@ -15,6 +15,29 @@ def client() -> OpenAI:
     return _client
 
 
+def _call_openai(system: str, content: str) -> str:
+    sdk = client()
+    if hasattr(sdk, "responses"):
+        resp = sdk.responses.create(
+            model=OPENAI_MODEL,
+            input=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": content},
+            ],
+        )
+        return resp.output_text
+
+    resp = sdk.chat.completions.create(
+        model=OPENAI_MODEL,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": content},
+        ],
+    )
+    message = resp.choices[0].message
+    return message.content or ""
+
+
 def ask_agent(agent: str, user_text: str, memory: str = "", extra: str = "") -> str:
     system = AGENT_PROMPTS.get(agent, AGENT_PROMPTS["supervisor"])
     content = f"""Память/контекст:
@@ -26,14 +49,7 @@ def ask_agent(agent: str, user_text: str, memory: str = "", extra: str = "") -> 
 Задача пользователя:
 {user_text}"""
     try:
-        resp = client().responses.create(
-            model=OPENAI_MODEL,
-            input=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": content},
-            ],
-        )
-        return resp.output_text
+        return _call_openai(system, content)
     except Exception as exc:
         return f"Ошибка OpenAI: {exc}"
 
