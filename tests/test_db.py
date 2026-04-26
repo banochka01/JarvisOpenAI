@@ -44,6 +44,13 @@ def test_db_seeds_pc_shortcuts(tmp_path):
     assert shortcuts["paradeevich-youtube"]["url"] == "https://www.youtube.com/@paradeevich"
     assert "парадеевича" in shortcuts["paradeevich-youtube"]["aliases"]
     assert shortcuts["youtube"]["url"] == "https://www.youtube.com/"
+    assert shortcuts["yandex-music"]["url"] == "app://yandex-music"
+    assert "яндекс музыку" in shortcuts["yandex-music"]["aliases"]
+    assert shortcuts["spotify"]["url"] == "app://spotify"
+    assert "дотифай" in shortcuts["spotify"]["aliases"]
+    assert shortcuts["valorant"]["url"] == "app://valorant"
+    assert "валик" in shortcuts["valorant"]["aliases"]
+    assert shortcuts["ayugram"]["url"] == "app://ayugram"
 
 
 def test_add_and_get_pc_shortcut(tmp_path):

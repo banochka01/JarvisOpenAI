@@ -49,6 +49,10 @@ OPENAI_MODEL = _env("OPENAI_MODEL", "gpt-4.1-mini")
 WORKSPACE = _project_path_env("WORKSPACE", ROOT / "jarvis" / "workspace")
 DB_PATH = _project_path_env("DB_PATH", ROOT / "jarvis" / "storage" / "jarvis.db")
 AUTO_APPROVE_SAFE_COMMANDS = _env("AUTO_APPROVE_SAFE_COMMANDS", "0") == "1"
+STT_PROVIDER = _env("STT_PROVIDER", "openai").lower()
+STT_SERVER_URL = _env("STT_SERVER_URL")
+STT_SERVER_TOKEN = _env("STT_SERVER_TOKEN")
+STT_SERVER_TIMEOUT = _int_env("STT_SERVER_TIMEOUT", 120)
 
 WORKSPACE.mkdir(parents=True, exist_ok=True)
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)

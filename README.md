@@ -83,13 +83,25 @@ run_windows.bat
 - `/commit сообщение` — показать diff и создать approve на `git commit`.
 - `/steam app_id` — открыть `steam://install/app_id` после approve.
 - `/steamstart` — выбрать игру кнопкой и запустить через `steam://rungameid/app_id`.
-- `/pc запрос` — открыть сайт в браузере, например `/pc включи парадеевича на ютубе`.
+- `/pc запрос` — открыть сайт или приложение, например `/pc включи парадеевича на ютубе`, `/pc открой яндекс музыку`, `/pc запусти валик`.
+- голосовое сообщение в Telegram — распознать речь и выполнить PC-команду, если фраза понятна.
 - `/files` — список файлов workspace.
 - `/read путь` — прочитать файл workspace.
 - `/write путь | текст` — показать diff и записать файл после approve.
 - `/remember ключ | значение` и `/memory` — простая память.
 
 Статусы задач: `new`, `planned`, `in_progress`, `testing`, `needs_fix`, `done`, `failed`.
+
+Локальные приложения для `/pc` можно привязать к `.lnk` или `.exe` через `.env`:
+
+```env
+PC_APP_YANDEX_MUSIC_PATH=C:\path\to\Yandex Music.lnk
+PC_APP_SPOTIFY_PATH=C:\path\to\Spotify.lnk
+PC_APP_VALORANT_PATH=C:\path\to\VALORANT.lnk
+PC_APP_AYUGRAM_PATH=C:\path\to\AyuGram.exe
+```
+
+Если путь не задан, Yandex Music и Spotify откроются в браузере, VALORANT попробует стартовать через Riot URI, а AyuGram попросит указать путь.
 
 ## Безопасность
 
@@ -159,6 +171,19 @@ SQLite хранит:
 - служебные логи.
 
 База по умолчанию: `jarvis\storage\jarvis.db`.
+
+## Speech-to-text через VPS
+
+По умолчанию голосовые расшифровываются через OpenAI `whisper-1`. Если квота OpenAI недоступна, можно вынести STT на VPS:
+
+```env
+STT_PROVIDER=server
+STT_SERVER_URL=https://your-domain.example/transcribe
+STT_SERVER_TOKEN=change-this-token
+STT_SERVER_TIMEOUT=120
+```
+
+Минимальный сервер для VPS лежит в `vps_stt_server/`. Он принимает Telegram `.ogg`, распознает через `faster-whisper` и возвращает JSON `{"text": "..."}`.
 
 ## Проверка
 

@@ -46,6 +46,34 @@ DEFAULT_PC_SHORTCUTS = [
     ("chatgpt", "ChatGPT", "https://chatgpt.com/", ["chatgpt", "чатгпт", "чат gpt", "джипити"], "site"),
     ("github", "GitHub", "https://github.com/", ["github", "гитхаб"], "site"),
     ("gmail", "Gmail", "https://mail.google.com/", ["gmail", "почта gmail", "гугл почта"], "site"),
+    (
+        "yandex-music",
+        "Yandex Music",
+        "app://yandex-music",
+        ["яндекс музыка", "яндекс музыку", "яндекс музыки", "yandex music", "ya music"],
+        "app",
+    ),
+    (
+        "spotify",
+        "Spotify",
+        "app://spotify",
+        ["spotify", "спотифай", "спотифая", "дотифай", "дотифая"],
+        "app",
+    ),
+    (
+        "valorant",
+        "VALORANT",
+        "app://valorant",
+        ["valorant", "валорант", "валоранта", "валик", "валика"],
+        "app",
+    ),
+    (
+        "ayugram",
+        "AyuGram",
+        "app://ayugram",
+        ["ayugram", "аюграм", "аюграмм", "аю грам", "аю грамм"],
+        "app",
+    ),
 ]
 
 

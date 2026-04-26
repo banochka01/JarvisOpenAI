@@ -1,4 +1,6 @@
 import asyncio
+import tempfile
+from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest, NetworkError, TimedOut
@@ -28,10 +30,12 @@ from jarvis.text_utils import (
 from jarvis.tools.file_tool import list_files, preview_diff, read_file, write_file
 from jarvis.tools.pc_tool import open_pc_target, resolve_pc_request
 from jarvis.tools.safe_shell import READ_ONLY, classify_command, run_safe
+from jarvis.tools.speech_tool import SpeechQuotaError, transcribe_audio
 from jarvis.tools.steam_tool import install_steam_game, launch_steam_game
 
 
 MAX_TG_TEXT = 3900
+MAX_VOICE_SECONDS = 120
 db = JarvisDB(DB_PATH)
 orchestrator = Orchestrator(db)
 
@@ -288,6 +292,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /steam app_id — открыть установку Steam через approve
 /steamstart — выбрать игру из списка и запустить через Steam
 /pc запрос — открыть сайт/приложение в браузере, например: /pc включи парадеевича на ютубе
+Голосовое сообщение — распознать речь и выполнить PC-команду, если она понятна
 /memory — показать память
 /remember ключ | значение — сохранить память
 /files — список файлов workspace
@@ -603,6 +608,67 @@ async def pc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Не удалось открыть: {exc}", reply_markup=main_menu())
 
 
+async def voice_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await guard(update):
+        return
+    voice = update.message.voice if update.message else None
+    if not voice:
+        return
+    if voice.duration and voice.duration > MAX_VOICE_SECONDS:
+        await update.message.reply_text(f"Голосовое длиннее {MAX_VOICE_SECONDS} секунд пока не принимаю.")
+        return
+
+    msg = await update.message.reply_text("Слушаю голосовое...")
+    temp_path = None
+    try:
+        tg_file = await context.bot.get_file(voice.file_id)
+        with tempfile.NamedTemporaryFile(prefix="jarvis_voice_", suffix=".ogg", delete=False) as tmp:
+            temp_path = Path(tmp.name)
+        await tg_file.download_to_drive(custom_path=str(temp_path))
+
+        text = transcribe_audio(temp_path)
+        if not text:
+            await edit_or_reply_long(msg, "Не смог разобрать голосовое.", reply_markup=main_menu())
+            return
+
+        target = resolve_pc_request(text, db.list_pc_shortcuts(), allow_fallback_search=False)
+        if target:
+            out = open_pc_target(target)
+            db.log("voice:pc", f"user_id={update.effective_user.id} text={text}\n{target.url}\n{out}")
+            await edit_or_reply_long(msg, f"Распознал: {text}\n\n{out}", reply_markup=main_menu())
+            return
+
+        db.log("voice:transcribed", f"user_id={update.effective_user.id} text={text}")
+        await edit_or_reply_long(
+            msg,
+            "Распознал голосовое:\n"
+            f"{text}\n\n"
+            "Пока голосом выполняю PC-команды вроде: включи парадеевича на ютубе.",
+            reply_markup=main_menu(),
+        )
+    except SpeechQuotaError:
+        text = (
+            "Голосовое распознавание сейчас недоступно: закончилась квота OpenAI API.\n\n"
+            "Пока можно писать команду текстом, например:\n"
+            "/pc включи парадеевича на ютубе"
+        )
+        db.log("voice:quota", f"user_id={update.effective_user.id} file_id={voice.file_id}")
+        await edit_or_reply_long(msg, text, reply_markup=main_menu())
+    except Exception as exc:
+        db.log("voice:error", repr(exc))
+        await edit_or_reply_long(
+            msg,
+            "Не удалось обработать голосовое. Попробуй еще раз или напиши команду текстом.",
+            reply_markup=main_menu(),
+        )
+    finally:
+        if temp_path:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
 async def files_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await guard(update):
         return
@@ -836,6 +902,7 @@ def main():
     app.add_handler(CommandHandler("read", read_cmd))
     app.add_handler(CommandHandler("write", write_cmd))
     app.add_handler(CallbackQueryHandler(buttons))
+    app.add_handler(MessageHandler(filters.VOICE, voice_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, plain_text))
     app.add_error_handler(error_handler)
     print("Jarvis MVP+ started")
