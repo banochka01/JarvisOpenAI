@@ -11,6 +11,42 @@ STATUS_MIGRATION = {
     "review": "testing",
     "blocked": "needs_fix",
 }
+DEFAULT_STEAM_GAMES = [
+    ("Deep Rock Galactic", "548430"),
+    ("FPV Kamikaze Drone", "2707940"),
+    ("A Way Out", "1222700"),
+    ("Geometry Dash", "322170"),
+    ("Gunfire Reborn", "1217060"),
+    ("Liftoff: Micro Drones", "1432320"),
+    ("LOCKDOWN Protocol", "2780980"),
+    ("PUBG: BATTLEGROUNDS", "578080"),
+    ("R.E.P.O.", "3241660"),
+]
+DEFAULT_PC_SHORTCUTS = [
+    (
+        "paradeevich-youtube",
+        "Парадеевич на YouTube",
+        "https://www.youtube.com/@paradeevich",
+        ["парадеевич", "парадеевича", "paradeevich", "парадеевич ютуб", "парадеевича на ютубе"],
+        "creator",
+    ),
+    (
+        "paradeevich-twitch",
+        "Парадеевич на Twitch",
+        "https://www.twitch.tv/paradeev1ch",
+        ["парадеевич твич", "парадеевича на твиче", "paradeevich twitch", "paradeev1ch"],
+        "creator",
+    ),
+    ("youtube", "YouTube", "https://www.youtube.com/", ["youtube", "ютуб", "ютубе", "ютубчик"], "site"),
+    ("google", "Google", "https://www.google.com/", ["google", "гугл", "гугле"], "site"),
+    ("yandex", "Yandex", "https://ya.ru/", ["yandex", "яндекс", "яндексе"], "site"),
+    ("twitch", "Twitch", "https://www.twitch.tv/", ["twitch", "твич", "твиче"], "site"),
+    ("vk", "VK", "https://vk.com/", ["vk", "вк", "вконтакте"], "site"),
+    ("telegram", "Telegram Web", "https://web.telegram.org/", ["telegram", "телеграм", "телега"], "site"),
+    ("chatgpt", "ChatGPT", "https://chatgpt.com/", ["chatgpt", "чатгпт", "чат gpt", "джипити"], "site"),
+    ("github", "GitHub", "https://github.com/", ["github", "гитхаб"], "site"),
+    ("gmail", "Gmail", "https://mail.google.com/", ["gmail", "почта gmail", "гугл почта"], "site"),
+]
 
 
 class JarvisDB:
@@ -73,6 +109,21 @@ class JarvisDB:
                 created_at TEXT NOT NULL,
                 decided_at TEXT
             )""")
+            db.execute("""CREATE TABLE IF NOT EXISTS steam_games (
+                app_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )""")
+            db.execute("""CREATE TABLE IF NOT EXISTS pc_shortcuts (
+                slug TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                url TEXT NOT NULL,
+                aliases_json TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'site',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )""")
             db.execute("""CREATE TABLE IF NOT EXISTS clarification_requests (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
@@ -90,6 +141,27 @@ class JarvisDB:
                 db.execute("ALTER TABLE clarification_requests ADD COLUMN mode TEXT NOT NULL DEFAULT 'plan'")
             for old, new in STATUS_MIGRATION.items():
                 db.execute("UPDATE tasks SET status=? WHERE status=?", (new, old))
+            now = self._now()
+            db.executemany(
+                """INSERT INTO steam_games(app_id,name,created_at,updated_at)
+                   VALUES(?,?,?,?)
+                   ON CONFLICT(app_id) DO UPDATE SET name=excluded.name, updated_at=excluded.updated_at""",
+                [(app_id, name, now, now) for name, app_id in DEFAULT_STEAM_GAMES],
+            )
+            db.executemany(
+                """INSERT INTO pc_shortcuts(slug,name,url,aliases_json,kind,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?)
+                   ON CONFLICT(slug) DO UPDATE SET
+                       name=excluded.name,
+                       url=excluded.url,
+                       aliases_json=excluded.aliases_json,
+                       kind=excluded.kind,
+                       updated_at=excluded.updated_at""",
+                [
+                    (slug, name, url, json.dumps(aliases, ensure_ascii=False), kind, now, now)
+                    for slug, name, url, aliases, kind in DEFAULT_PC_SHORTCUTS
+                ],
+            )
             db.execute("UPDATE schema_version SET version=2")
 
     def _now(self) -> str:
@@ -189,6 +261,96 @@ class JarvisDB:
                 (task_id,),
             ).fetchone()
         return bool(row)
+
+    def add_steam_game(self, name: str, app_id: str):
+        app_id = "".join(ch for ch in str(app_id) if ch.isdigit())
+        name = name.strip()
+        if not name:
+            raise ValueError("steam game name is required")
+        if not app_id:
+            raise ValueError("steam app_id must be numeric")
+        now = self._now()
+        with self.conn() as db:
+            db.execute(
+                """INSERT INTO steam_games(app_id,name,created_at,updated_at)
+                   VALUES(?,?,?,?)
+                   ON CONFLICT(app_id) DO UPDATE SET name=excluded.name, updated_at=excluded.updated_at""",
+                (app_id, name, now, now),
+            )
+
+    def list_steam_games(self):
+        with self.conn() as db:
+            return db.execute(
+                "SELECT app_id,name FROM steam_games ORDER BY name COLLATE NOCASE"
+            ).fetchall()
+
+    def get_steam_game(self, app_id: str):
+        app_id = "".join(ch for ch in str(app_id) if ch.isdigit())
+        if not app_id:
+            return None
+        with self.conn() as db:
+            return db.execute(
+                "SELECT app_id,name FROM steam_games WHERE app_id=?",
+                (app_id,),
+            ).fetchone()
+
+    def add_pc_shortcut(self, slug: str, name: str, url: str, aliases: list[str] | None = None, kind: str = "site"):
+        slug = slug.strip().lower()
+        name = name.strip()
+        url = url.strip()
+        aliases = aliases or []
+        if not slug:
+            raise ValueError("pc shortcut slug is required")
+        if not name:
+            raise ValueError("pc shortcut name is required")
+        if not url:
+            raise ValueError("pc shortcut url is required")
+        now = self._now()
+        with self.conn() as db:
+            db.execute(
+                """INSERT INTO pc_shortcuts(slug,name,url,aliases_json,kind,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?)
+                   ON CONFLICT(slug) DO UPDATE SET
+                       name=excluded.name,
+                       url=excluded.url,
+                       aliases_json=excluded.aliases_json,
+                       kind=excluded.kind,
+                       updated_at=excluded.updated_at""",
+                (slug, name, url, json.dumps(aliases, ensure_ascii=False), kind, now, now),
+            )
+
+    def list_pc_shortcuts(self):
+        with self.conn() as db:
+            rows = db.execute(
+                """SELECT slug,name,url,aliases_json,kind
+                   FROM pc_shortcuts ORDER BY kind, name COLLATE NOCASE"""
+            ).fetchall()
+        return [
+            {
+                "slug": row[0],
+                "name": row[1],
+                "url": row[2],
+                "aliases": json.loads(row[3]),
+                "kind": row[4],
+            }
+            for row in rows
+        ]
+
+    def get_pc_shortcut(self, slug: str):
+        with self.conn() as db:
+            row = db.execute(
+                "SELECT slug,name,url,aliases_json,kind FROM pc_shortcuts WHERE slug=?",
+                (slug,),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "slug": row[0],
+            "name": row[1],
+            "url": row[2],
+            "aliases": json.loads(row[3]),
+            "kind": row[4],
+        }
 
     def create_approval(self, user_id: int, action_type: str, payload: dict) -> int:
         with self.conn() as db:

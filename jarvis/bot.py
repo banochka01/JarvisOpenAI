@@ -26,8 +26,9 @@ from jarvis.text_utils import (
     strip_new_task_prefix,
 )
 from jarvis.tools.file_tool import list_files, preview_diff, read_file, write_file
+from jarvis.tools.pc_tool import open_pc_target, resolve_pc_request
 from jarvis.tools.safe_shell import READ_ONLY, classify_command, run_safe
-from jarvis.tools.steam_tool import install_steam_game
+from jarvis.tools.steam_tool import install_steam_game, launch_steam_game
 
 
 MAX_TG_TEXT = 3900
@@ -42,6 +43,7 @@ def main_menu():
         [InlineKeyboardButton("🧩 Агенты", callback_data="menu:agents"), InlineKeyboardButton("🗂 Файлы", callback_data="menu:files")],
         [InlineKeyboardButton("🛡 Проверка", callback_data="menu:security"), InlineKeyboardButton("💾 Память", callback_data="menu:memory")],
         [InlineKeyboardButton("⚙️ Shell", callback_data="menu:shell"), InlineKeyboardButton("🎮 Steam", callback_data="menu:steam")],
+        [InlineKeyboardButton("🖥 PC", callback_data="menu:pc")],
     ])
 
 
@@ -59,6 +61,24 @@ def approval_menu(approval_id: int, ok_text: str = "✅ Выполнить"):
         InlineKeyboardButton(ok_text, callback_data=f"confirm:{approval_id}"),
         InlineKeyboardButton("❌ Отмена", callback_data=f"cancel:{approval_id}"),
     ]])
+
+
+def steam_games_menu():
+    rows = [
+        [InlineKeyboardButton(name, callback_data=f"steamstart:{app_id}")]
+        for app_id, name in db.list_steam_games()
+    ]
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")])
+    return InlineKeyboardMarkup(rows)
+
+
+def pc_shortcuts_menu():
+    rows = [
+        [InlineKeyboardButton(item["name"], callback_data=f"pcopen:{item['slug']}")]
+        for item in db.list_pc_shortcuts()
+    ]
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")])
+    return InlineKeyboardMarkup(rows)
 
 
 async def guard(update: Update) -> bool:
@@ -266,6 +286,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /gitdiff — показать git diff
 /commit сообщение — создать approval на git commit
 /steam app_id — открыть установку Steam через approve
+/steamstart — выбрать игру из списка и запустить через Steam
+/pc запрос — открыть сайт/приложение в браузере, например: /pc включи парадеевича на ютубе
 /memory — показать память
 /remember ключ | значение — сохранить память
 /files — список файлов workspace
@@ -547,6 +569,40 @@ async def steam_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def steamstart_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await guard(update):
+        return
+    games = db.list_steam_games()
+    if not games:
+        await update.message.reply_text("Steam games list is empty.", reply_markup=main_menu())
+        return
+    await update.message.reply_text("Choose a Steam game to launch:", reply_markup=steam_games_menu())
+
+
+async def pc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await guard(update):
+        return
+    raw = " ".join(context.args) or update.message.text.replace("/pc", "", 1).strip()
+    if not raw:
+        await update.message.reply_text(
+            "Напиши: /pc включи парадеевича на ютубе\n"
+            "Можно также: /pc открой ютуб, /pc найди python на ютубе, /pc https://example.com",
+            reply_markup=pc_shortcuts_menu(),
+        )
+        return
+    try:
+        target = resolve_pc_request(raw, db.list_pc_shortcuts())
+        if not target:
+            await update.message.reply_text("Не понял, что открыть. Попробуй: /pc открой ютуб", reply_markup=pc_shortcuts_menu())
+            return
+        out = open_pc_target(target)
+        db.log("pc:open", f"user_id={update.effective_user.id} source={target.source} name={target.name}\n{target.url}\n{out}")
+        await update.message.reply_text(out, reply_markup=main_menu())
+    except Exception as exc:
+        db.log("pc:error", f"request={raw}\n{exc!r}")
+        await update.message.reply_text(f"Не удалось открыть: {exc}", reply_markup=main_menu())
+
+
 async def files_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await guard(update):
         return
@@ -621,12 +677,40 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data == "menu:shell":
             await query_result(q, "Напиши: /shell команда\nНапример: /shell git status", reply_markup=main_menu())
         elif data == "menu:steam":
-            await query_result(q, "Напиши: /steam app_id\nНапример: /steam 730", reply_markup=main_menu())
+            await query_result(q, "Choose a Steam game to launch, or use /steam app_id to open install:", reply_markup=steam_games_menu())
+        elif data == "menu:pc":
+            await query_result(
+                q,
+                "Напиши: /pc включи парадеевича на ютубе\nИли выбери готовый shortcut:",
+                reply_markup=pc_shortcuts_menu(),
+            )
         elif data == "menu:security":
             await query_result(q, "Напиши: /agent security что проверить", reply_markup=main_menu())
         elif data.startswith("agent:"):
             ag = data.split(":", 1)[1]
             await query_result(q, f"Ок. Теперь: /agent {ag} твоя задача", reply_markup=agent_menu())
+        elif data.startswith("steamstart:"):
+            app_id = data.split(":", 1)[1]
+            game = db.get_steam_game(app_id)
+            if not game:
+                await query_result(q, f"Steam game app_id={app_id} not found.", reply_markup=steam_games_menu())
+                return
+            out = launch_steam_game(game[0], game[1])
+            db.log("steam:start", f"user_id={update.effective_user.id} app_id={game[0]} name={game[1]}\n{out}")
+            await query_result(q, out, reply_markup=steam_games_menu())
+        elif data.startswith("pcopen:"):
+            slug = data.split(":", 1)[1]
+            item = db.get_pc_shortcut(slug)
+            if not item:
+                await query_result(q, f"PC shortcut {slug} not found.", reply_markup=pc_shortcuts_menu())
+                return
+            target = resolve_pc_request(item["name"], [item])
+            if not target:
+                await query_result(q, f"Could not resolve PC shortcut {slug}.", reply_markup=pc_shortcuts_menu())
+                return
+            out = open_pc_target(target)
+            db.log("pc:open", f"user_id={update.effective_user.id} slug={slug} name={target.name}\n{target.url}\n{out}")
+            await query_result(q, out, reply_markup=pc_shortcuts_menu())
         elif data.startswith("confirm:"):
             approval_id = int(data.split(":", 1)[1])
             out = execute_approval(approval_id, update.effective_user.id)
@@ -746,6 +830,8 @@ def main():
     app.add_handler(CommandHandler("gitdiff", gitdiff_cmd))
     app.add_handler(CommandHandler("commit", commit_cmd))
     app.add_handler(CommandHandler("steam", steam_cmd))
+    app.add_handler(CommandHandler("steamstart", steamstart_cmd))
+    app.add_handler(CommandHandler("pc", pc_cmd))
     app.add_handler(CommandHandler("files", files_cmd))
     app.add_handler(CommandHandler("read", read_cmd))
     app.add_handler(CommandHandler("write", write_cmd))

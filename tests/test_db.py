@@ -9,7 +9,51 @@ def test_db_initializes_core_tables(tmp_path):
     with db.conn() as conn:
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
 
-    assert {"tasks", "messages", "agent_results", "approval_requests"}.issubset(tables)
+    assert {"tasks", "messages", "agent_results", "approval_requests", "steam_games", "pc_shortcuts"}.issubset(tables)
+
+
+def test_db_seeds_steam_games(tmp_path):
+    db = JarvisDB(tmp_path / "jarvis.db")
+
+    games = dict(db.list_steam_games())
+
+    assert games["548430"] == "Deep Rock Galactic"
+    assert games["2707940"] == "FPV Kamikaze Drone"
+    assert games["1222700"] == "A Way Out"
+    assert games["322170"] == "Geometry Dash"
+    assert games["1217060"] == "Gunfire Reborn"
+    assert games["1432320"] == "Liftoff: Micro Drones"
+    assert games["2780980"] == "LOCKDOWN Protocol"
+    assert games["578080"] == "PUBG: BATTLEGROUNDS"
+    assert games["3241660"] == "R.E.P.O."
+
+
+def test_add_and_get_steam_game_normalizes_app_id(tmp_path):
+    db = JarvisDB(tmp_path / "jarvis.db")
+
+    db.add_steam_game("Counter-Strike 2", "app/730")
+
+    assert db.get_steam_game("730") == ("730", "Counter-Strike 2")
+
+
+def test_db_seeds_pc_shortcuts(tmp_path):
+    db = JarvisDB(tmp_path / "jarvis.db")
+
+    shortcuts = {item["slug"]: item for item in db.list_pc_shortcuts()}
+
+    assert shortcuts["paradeevich-youtube"]["url"] == "https://www.youtube.com/@paradeevich"
+    assert "парадеевича" in shortcuts["paradeevich-youtube"]["aliases"]
+    assert shortcuts["youtube"]["url"] == "https://www.youtube.com/"
+
+
+def test_add_and_get_pc_shortcut(tmp_path):
+    db = JarvisDB(tmp_path / "jarvis.db")
+
+    db.add_pc_shortcut("docs", "Docs", "https://docs.example.test", ["доки"], "site")
+
+    item = db.get_pc_shortcut("docs")
+    assert item["name"] == "Docs"
+    assert item["aliases"] == ["доки"]
 
 
 def test_db_migrates_old_task_status(tmp_path):

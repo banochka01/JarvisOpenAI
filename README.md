@@ -82,6 +82,8 @@ run_windows.bat
 - `/gitdiff` — показать `git diff`.
 - `/commit сообщение` — показать diff и создать approve на `git commit`.
 - `/steam app_id` — открыть `steam://install/app_id` после approve.
+- `/steamstart` — выбрать игру кнопкой и запустить через `steam://rungameid/app_id`.
+- `/pc запрос` — открыть сайт в браузере, например `/pc включи парадеевича на ютубе`.
 - `/files` — список файлов workspace.
 - `/read путь` — прочитать файл workspace.
 - `/write путь | текст` — показать diff и записать файл после approve.
