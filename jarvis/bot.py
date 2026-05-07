@@ -216,23 +216,28 @@ def format_pending_approvals(user_id: int) -> str:
 
 
 def execute_approval(approval_id: int, user_id: int) -> str:
-    action = db.get_pending_approval(approval_id, user_id)
+    action = db.claim_pending_approval(approval_id, user_id)
     if not action:
         return "Действие уже не найдено/устарело."
 
-    db.decide_approval(approval_id, "approved")
     payload = action["payload"]
-    if action["action_type"] == "shell":
-        out = run_safe(payload["command"])
-    elif action["action_type"] == "steam":
-        out = install_steam_game(payload["app_id"])
-    elif action["action_type"] == "mark_done":
-        db.set_task_status(int(payload["task_id"]), "done")
-        out = f"✅ Задача #{payload['task_id']} отмечена done вручную."
-    elif action["action_type"] == "write_file":
-        out = write_file(payload["path"], payload["content"])
-    else:
-        out = "Неизвестное действие."
+    try:
+        if action["action_type"] == "shell":
+            out = run_safe(payload["command"])
+        elif action["action_type"] == "steam":
+            out = install_steam_game(payload["app_id"])
+        elif action["action_type"] == "mark_done":
+            db.set_task_status(int(payload["task_id"]), "done")
+            out = f"✅ Задача #{payload['task_id']} отмечена done вручную."
+        elif action["action_type"] == "write_file":
+            out = write_file(payload["path"], payload["content"])
+        else:
+            out = "Неизвестное действие."
+    except Exception as exc:
+        db.finish_approval(approval_id, "failed")
+        db.log("approval:failed", f"#{approval_id} user_id={user_id} type={action['action_type']}\n{exc!r}")
+        return f"❌ Approval #{approval_id} завершился ошибкой: {exc}"
+    db.finish_approval(approval_id, "approved")
     db.log("approval:approved", f"#{approval_id} user_id={user_id} type={action['action_type']}\n{out}")
     return out
 

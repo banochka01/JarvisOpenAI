@@ -449,6 +449,43 @@ class JarvisDB:
             return None
         return {"id": row[0], "action_type": row[1], "payload": json.loads(row[2])}
 
+    def claim_pending_approval(self, approval_id: int, user_id: int | None = None):
+        now = self._now()
+        with self.conn() as db:
+            if user_id is None:
+                params = (now, approval_id)
+                query = "UPDATE approval_requests SET status='running', decided_at=? WHERE id=? AND status='pending'"
+            else:
+                params = (now, approval_id, user_id)
+                query = (
+                    "UPDATE approval_requests SET status='running', decided_at=? "
+                    "WHERE id=? AND user_id=? AND status='pending'"
+                )
+            cur = db.execute(query, params)
+            if cur.rowcount != 1:
+                return None
+            row = db.execute(
+                "SELECT id,user_id,action_type,payload_json FROM approval_requests WHERE id=?",
+                (approval_id,),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "id": row[0],
+            "user_id": row[1],
+            "action_type": row[2],
+            "payload": json.loads(row[3]),
+        }
+
+    def finish_approval(self, approval_id: int, status: str):
+        if status not in {"approved", "failed"}:
+            raise ValueError("approval finish status must be approved or failed")
+        with self.conn() as db:
+            db.execute(
+                "UPDATE approval_requests SET status=?, decided_at=? WHERE id=? AND status='running'",
+                (status, self._now(), approval_id),
+            )
+
     def decide_approval(self, approval_id: int, status: str):
         if status not in {"approved", "cancelled"}:
             raise ValueError("approval status must be approved or cancelled")

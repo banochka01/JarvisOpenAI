@@ -115,6 +115,23 @@ def test_list_pending_approvals_for_user_filters_status_and_user(tmp_path):
     assert rows[0]["payload"]["command"] == "git status"
 
 
+def test_claim_pending_approval_is_single_use(tmp_path):
+    db = JarvisDB(tmp_path / "jarvis.db")
+
+    approval_id = db.create_approval(123, "shell", {"command": "git status"})
+
+    claimed = db.claim_pending_approval(approval_id, 123)
+
+    assert claimed["action_type"] == "shell"
+    assert claimed["payload"]["command"] == "git status"
+    assert db.claim_pending_approval(approval_id, 123) is None
+    assert db.get_pending_approval(approval_id, 123) is None
+
+    db.finish_approval(approval_id, "approved")
+    row = db.get_approval_any_user(approval_id)
+    assert row["status"] == "approved"
+
+
 def test_pending_clarification_lifecycle(tmp_path):
     db = JarvisDB(tmp_path / "jarvis.db")
 
